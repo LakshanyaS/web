@@ -1,6 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const FormData = require('form-data');
 const app = express();
 
 app.use(express.json());
@@ -10,156 +9,225 @@ const FOOD_API_URL = 'https://food-scanner-server-f486.onrender.com/analyze';
 // Main webhook endpoint for Zoho Cliq
 app.post('/zoho-webhook', async (req, res) => {
   try {
-    console.log('Received webhook from Zoho Cliq:', JSON.stringify(req.body, null, 2));
+    console.log('📩 Received from Zoho Cliq:', JSON.stringify(req.body, null, 2));
     
-    const { message, user } = req.body;
+    const message = req.body;
     
-    // Check if message has an attachment (image)
-    if (!message?.attachments || message.attachments.length === 0) {
+    // Extract user info
+    const userName = message.user?.name || 'User';
+    const userEmail = message.user?.email || 'user@example.com';
+    
+    // Check for attachments
+    let imageUrl = null;
+    
+    // Try different possible attachment structures
+    if (message.attachments && message.attachments.length > 0) {
+      const attachment = message.attachments[0];
+      imageUrl = attachment.url || attachment.file_url || attachment.download_url || attachment.link;
+    }
+    
+    // If no attachment found, ask user to upload
+    if (!imageUrl) {
       return res.json({
-        text: "📸 Please upload an image of your food to analyze its calories!",
+        text: "📸 Please upload an image of your food!\n\nI'll analyze it and tell you the calories and nutrition information.\n\nJust click the 📎 attachment icon and upload a food photo.",
         bot: {
-          name: "Calorie Scanner"
+          name: "Food Scanner"
         }
       });
     }
 
-    // Get the first image attachment
-    const attachment = message.attachments[0];
-    const imageUrl = attachment.url || attachment.file_url;
+    console.log('🖼️ Image URL found:', imageUrl);
 
-    if (!imageUrl) {
-      return res.json({
-        text: "❌ Could not get image URL. Please try uploading again."
-      });
-    }
-
-    // Send initial response
+    // Send immediate response
     res.json({
-      text: "🔍 Analyzing your food image... Please wait a moment.",
+      text: "🔍 Analyzing your food image... Please wait 10-15 seconds.",
       bot: {
-        name: "Calorie Scanner"
+        name: "Food Scanner"
       }
     });
 
-    // Call your food analysis API
-    const analysisResponse = await axios.post(FOOD_API_URL, {
+    // Call your food scanner API
+    console.log('📡 Calling food scanner API...');
+    
+    const foodApiResponse = await axios.post(FOOD_API_URL, {
       imageUrl: imageUrl,
-      userName: user.name || 'User',
-      userEmail: user.email || 'user@example.com'
+      userName: userName,
+      userEmail: userEmail
     }, {
       headers: {
         'Content-Type': 'application/json'
       },
-      timeout: 30000 // 30 seconds timeout
+      timeout: 60000 // 60 seconds timeout
     });
 
-    const data = analysisResponse.data;
+    console.log('✅ Food API response:', JSON.stringify(foodApiResponse.data, null, 2));
 
-    // Send the results back to Zoho Cliq using bot.execute
-    if (req.body.bot?.token) {
-      await sendResultsToCliq(req.body, data);
+    const { foods, total_calories, total_protein, total_carbs, total_fat } = foodApiResponse.data;
+
+    // Build response text
+    let resultText = "🍽️ **Food Analysis Complete!**\n\n";
+    
+    if (foods && foods.length > 0) {
+      foods.forEach((food, index) => {
+        resultText += `**${index + 1}. ${food.name}**\n`;
+        resultText += `Portion: ${food.portion}\n`;
+        resultText += `Calories: ${food.calories} kcal | Protein: ${food.protein}g | Carbs: ${food.carbs}g | Fat: ${food.fat}g\n\n`;
+      });
     }
+    
+    resultText += "━━━━━━━━━━━━━━━\n";
+    resultText += "**📊 TOTAL NUTRITION**\n";
+    resultText += `🔥 Calories: **${total_calories} kcal**\n`;
+    resultText += `💪 Protein: ${total_protein}g\n`;
+    resultText += `🌾 Carbs: ${total_carbs}g\n`;
+    resultText += `🥑 Fat: ${total_fat}g`;
+
+    // Send result back to Zoho Cliq using the bot API
+    await sendMessageToCliq(message, resultText);
 
   } catch (error) {
-    console.error('Error processing request:', error.message);
+    console.error('❌ Error:', error.message);
+    console.error('Error details:', error.response?.data || error);
     
-    // Try to send error message to Cliq
-    if (req.body.bot?.token) {
-      await sendErrorToCliq(req.body, error.message);
+    // Try to send error message to user
+    try {
+      await sendMessageToCliq(req.body, `❌ Sorry, I couldn't analyze the image.\n\nError: ${error.message}\n\nPlease try:\n• Uploading a clearer image\n• Taking a photo in better lighting\n• Waiting 30 seconds and trying again`);
+    } catch (sendError) {
+      console.error('Failed to send error message:', sendError.message);
     }
   }
 });
 
-// Function to send results back to Zoho Cliq
-async function sendResultsToCliq(originalRequest, analysisData) {
+// Function to send message back to Zoho Cliq
+async function sendMessageToCliq(originalMessage, text) {
   try {
-    const { foods, total_calories, total_protein, total_carbs, total_fat } = analysisData;
+    // Option 1: Using chat webhook (if available)
+    if (originalMessage.chat?.id) {
+      const chatWebhook = `https://cliq.zoho.com/api/v2/chats/${originalMessage.chat.id}/message`;
+      
+      await axios.post(chatWebhook, {
+        text: text
+      }, {
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${originalMessage.bot?.token || ''}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      console.log('✅ Message sent to chat');
+      return;
+    }
+    
+    // Option 2: Using bot API (if available)
+    if (originalMessage.bot?.unique_name) {
+      const botWebhook = `https://cliq.zoho.com/api/v2/bots/${originalMessage.bot.unique_name}/message`;
+      
+      await axios.post(botWebhook, {
+        text: text,
+        broadcast: false
+      }, {
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${originalMessage.bot?.token || ''}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      console.log('✅ Message sent via bot API');
+      return;
+    }
+    
+    console.log('⚠️ Could not send message - no chat/bot info available');
+    
+  } catch (error) {
+    console.error('Error sending message to Cliq:', error.message);
+    throw error;
+  }
+}
 
-    // Build food items list
-    let foodsText = '';
-    if (foods && foods.length > 0) {
-      foods.forEach((food, index) => {
-        foodsText += `\n\n**${index + 1}. ${food.name}**\n`;
-        foodsText += `Portion: ${food.portion}\n`;
-        foodsText += `Calories: ${food.calories} kcal | Protein: ${food.protein}g | Carbs: ${food.carbs}g | Fat: ${food.fat}g`;
+// Simple Deluge-compatible endpoint
+app.post('/deluge-webhook', async (req, res) => {
+  try {
+    console.log('📩 Deluge webhook received:', JSON.stringify(req.body, null, 2));
+    
+    const { imageUrl, userName, userEmail } = req.body;
+    
+    if (!imageUrl) {
+      return res.json({
+        text: "❌ No image URL provided. Please upload an image."
       });
     }
 
-    // Create card response
-    const response = {
-      text: `🍽️ **Food Analysis Complete!**${foodsText}\n\n---\n**📊 Total Nutrition:**\n🔥 Calories: ${total_calories} kcal\n💪 Protein: ${total_protein}g\n🌾 Carbs: ${total_carbs}g\n🥑 Fat: ${total_fat}g`,
-      card: {
-        title: "Nutritional Analysis Results",
-        theme: "modern-inline",
-        sections: [
-          {
-            id: 1,
-            elements: foods.map((food, index) => ({
-              type: "text",
-              text: `**${food.name}** (${food.portion})\nCalories: ${food.calories} kcal | P: ${food.protein}g | C: ${food.carbs}g | F: ${food.fat}g`
-            }))
-          },
-          {
-            id: 2,
-            title: "Total Nutrition",
-            elements: [
-              {
-                type: "text",
-                text: `🔥 **${total_calories} kcal** | 💪 ${total_protein}g protein | 🌾 ${total_carbs}g carbs | 🥑 ${total_fat}g fat`
-              }
-            ]
-          }
-        ]
-      }
-    };
-
-    // Send message using Cliq API
-    const cliqApiUrl = `https://cliq.zoho.com/api/v2/bots/${originalRequest.bot.unique_name}/message`;
-    
-    await axios.post(cliqApiUrl, response, {
+    // Call food scanner API
+    const foodApiResponse = await axios.post(FOOD_API_URL, {
+      imageUrl: imageUrl,
+      userName: userName || 'User',
+      userEmail: userEmail || 'user@example.com'
+    }, {
       headers: {
-        'Authorization': `Zoho-oauthtoken ${originalRequest.bot.token}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 60000
+    });
+
+    const { foods, total_calories, total_protein, total_carbs, total_fat } = foodApiResponse.data;
+
+    // Build response
+    let resultText = "🍽️ **Food Analysis Complete!**\n\n";
+    
+    if (foods && foods.length > 0) {
+      foods.forEach((food, index) => {
+        resultText += `**${index + 1}. ${food.name}**\n`;
+        resultText += `Portion: ${food.portion}\n`;
+        resultText += `Calories: ${food.calories} kcal | Protein: ${food.protein}g | Carbs: ${food.carbs}g | Fat: ${food.fat}g\n\n`;
+      });
+    }
+    
+    resultText += "━━━━━━━━━━━━━━━\n";
+    resultText += "**📊 TOTAL NUTRITION**\n";
+    resultText += `🔥 Calories: **${total_calories} kcal**\n`;
+    resultText += `💪 Protein: ${total_protein}g\n`;
+    resultText += `🌾 Carbs: ${total_carbs}g\n`;
+    resultText += `🥑 Fat: ${total_fat}g`;
+
+    res.json({
+      text: resultText
     });
 
   } catch (error) {
-    console.error('Error sending results to Cliq:', error.message);
-  }
-}
-
-// Function to send error message to Zoho Cliq
-async function sendErrorToCliq(originalRequest, errorMessage) {
-  try {
-    const response = {
-      text: `❌ Sorry, I couldn't analyze the image. Error: ${errorMessage}\n\nPlease try again with a clearer image.`
-    };
-
-    const cliqApiUrl = `https://cliq.zoho.com/api/v2/bots/${originalRequest.bot.unique_name}/message`;
-    
-    await axios.post(cliqApiUrl, response, {
-      headers: {
-        'Authorization': `Zoho-oauthtoken ${originalRequest.bot.token}`,
-        'Content-Type': 'application/json'
-      }
+    console.error('Error in deluge webhook:', error.message);
+    res.json({
+      text: `❌ Error: ${error.message}\n\nPlease try again.`
     });
-  } catch (error) {
-    console.error('Error sending error to Cliq:', error.message);
   }
-}
+});
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
-  res.send('Zoho Cliq Food Scanner Bot is running! 🍽️');
+  res.send(`
+    <h1>🍽️ Zoho Cliq Food Scanner Bot</h1>
+    <p>Status: ✅ Running</p>
+    <h3>Endpoints:</h3>
+    <ul>
+      <li>POST /zoho-webhook - Main webhook for Zoho Cliq</li>
+      <li>POST /deluge-webhook - Simplified endpoint for Deluge scripts</li>
+    </ul>
+  `);
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      zoho_webhook: '/zoho-webhook',
+      deluge_webhook: '/deluge-webhook'
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Zoho Cliq Food Scanner Bot running on port ${PORT}`);
-  console.log(`Webhook URL: http://localhost:${PORT}/zoho-webhook`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📡 Zoho webhook: http://localhost:${PORT}/zoho-webhook`);
+  console.log(`📡 Deluge webhook: http://localhost:${PORT}/deluge-webhook`);
 });
