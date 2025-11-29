@@ -1,82 +1,50 @@
 const express = require('express');
 const axios = require('axios');
+const multer = require('multer');
+const fs = require('fs');
+const FormData = require('form-data');
+
 const app = express();
+
+// Configure multer for file uploads
+const upload = multer({ dest: 'uploads/' });
 
 app.use(express.json());
 
 const FOOD_API_URL = 'https://food-scanner-server-f486.onrender.com/analyze-food';
 
-// Main webhook endpoint for Zoho Cliq
-app.post('/zoho-webhook', async (req, res) => {
+// NEW ENDPOINT: Handle file upload from Zoho Cliq
+app.post('/zoho-webhook-file', upload.single('foodImage'), async (req, res) => {
   try {
-    console.log('=== ZOHO CLIQ REQUEST RECEIVED ===');
-    console.log('Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('=== FILE UPLOAD RECEIVED FROM ZOHO ===');
+    console.log('File:', req.file);
+    console.log('Body:', req.body);
     
-    const { message, attachments, user, bot } = req.body;
-    
-    // Extract user info
-    const userName = (user?.first_name || '') + ' ' + (user?.last_name || '');
-    const userEmail = user?.email || 'user@example.com';
+    if (!req.file) {
+      return res.json({
+        text: "❌ No image file received. Please upload a food image."
+      });
+    }
+
+    const userName = req.body.userName || 'User';
+    const userEmail = req.body.userEmail || 'user@example.com';
     
     console.log('User:', userName, userEmail);
-    
-    // Check if attachments exist
-    if (!attachments || attachments.length === 0) {
-      console.log('❌ No attachments found');
-      return res.json({
-        text: "📸 Please upload an image of your food!\n\nClick the 📎 attachment icon and upload a food photo."
-      });
-    }
+    console.log('Processing uploaded image...');
 
-    console.log('Attachments received:', attachments);
+    // Read the uploaded file
+    const imageBuffer = fs.readFileSync(req.file.path);
+    const base64Image = imageBuffer.toString('base64');
     
-    // Zoho Cliq sends attachments as just filenames
-    // We need to construct the full URL to download the image
-    // The image is typically available at a Zoho CDN URL
-    
-    // For now, tell the user we need them to upload the image to a public URL
-    // Or we need Zoho OAuth to download the file
-    
-    return res.json({
-      text: `❌ Image upload detected but Zoho Cliq doesn't provide direct image URLs.\n\n` +
-            `**Two options to fix this:**\n\n` +
-            `**Option 1 (Easiest):** Upload your food image to a free image hosting service like:\n` +
-            `• imgbb.com\n` +
-            `• imgur.com\n` +
-            `• postimages.org\n\n` +
-            `Then send me the image URL and I'll analyze it!\n\n` +
-            `**Option 2:** I need additional Zoho Cliq API permissions to download attachments directly. This requires OAuth setup.`
-    });
+    console.log('Image converted to base64, size:', base64Image.length);
 
-  } catch (error) {
-    console.error('=== ERROR ===');
-    console.error('Error:', error.message);
+    // Call your food scanner API with base64 image
+    console.log('Calling food API...');
     
-    res.json({
-      text: `❌ Error: ${error.message}`
-    });
-  }
-});
-
-// NEW: Direct URL analysis endpoint
-app.post('/analyze-url', async (req, res) => {
-  try {
-    console.log('=== DIRECT URL ANALYSIS ===');
-    const { imageUrl, userName, userEmail } = req.body;
-    
-    if (!imageUrl) {
-      return res.json({
-        text: "❌ No image URL provided. Please provide an image URL."
-      });
-    }
-
-    console.log('Analyzing image URL:', imageUrl);
-
-    // Call your food scanner API
     const foodApiResponse = await axios.post(FOOD_API_URL, {
-      imageUrl: imageUrl,
-      userName: userName || 'User',
-      userEmail: userEmail || 'user@example.com'
+      imageBase64: base64Image,
+      userName: userName,
+      userEmail: userEmail
     }, {
       headers: {
         'Content-Type': 'application/json'
@@ -84,10 +52,14 @@ app.post('/analyze-url', async (req, res) => {
       timeout: 60000
     });
 
-    console.log('✅ Food API response:', foodApiResponse.data);
+    console.log('✅ Food API Success');
+
+    // Clean up uploaded file
+    fs.unlinkSync(req.file.path);
 
     const { foods, total_calories, total_protein, total_carbs, total_fat } = foodApiResponse.data;
 
+    // Build response
     let resultText = "🍽️ **Food Analysis Complete!**\n\n";
     
     if (foods && foods.length > 0) {
@@ -110,9 +82,17 @@ app.post('/analyze-url', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error in analyze-url:', error.message);
+    console.error('=== ERROR ===');
+    console.error('Error:', error.message);
+    console.error('Response:', error.response?.data);
+    
+    // Clean up file if exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
     res.json({
-      text: `❌ Error: ${error.message}`
+      text: `❌ Error analyzing image: ${error.message}\n\nPlease try:\n• Uploading a clearer image\n• Taking photo in better lighting\n• Waiting 30 seconds (servers waking up)`
     });
   }
 });
@@ -124,16 +104,21 @@ app.get('/', (req, res) => {
     <p>Status: ✅ Running</p>
     <h3>Endpoints:</h3>
     <ul>
-      <li>POST /zoho-webhook - Zoho Cliq webhook (file uploads not working)</li>
-      <li>POST /analyze-url - Direct image URL analysis</li>
+      <li>POST /zoho-webhook-file - Handles file uploads from Zoho Cliq</li>
     </ul>
     <p>Food API: ${FOOD_API_URL}</p>
   `);
 });
 
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString()
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`📡 Zoho webhook: http://localhost:${PORT}/zoho-webhook`);
-  console.log(`📡 Analyze URL: http://localhost:${PORT}/analyze-url`);
+  console.log(`📡 File upload endpoint: http://localhost:${PORT}/zoho-webhook-file`);
 });
