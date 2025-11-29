@@ -4,7 +4,7 @@ const app = express();
 
 app.use(express.json());
 
-const FOOD_API_URL = 'https://food-scanner-server-f486.onrender.com/analyze';
+const FOOD_API_URL = 'https://food-scanner-server-f486.onrender.com/analyze-food';
 
 // Main webhook endpoint for Zoho Cliq
 app.post('/zoho-webhook', async (req, res) => {
